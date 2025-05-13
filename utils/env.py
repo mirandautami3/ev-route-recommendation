@@ -5,47 +5,46 @@ import networkx as nx
 from gym import spaces
 from math import radians, sin, cos, sqrt, atan2
 
-
 class EVRouteEnv(gym.Env):
     def __init__(self, G, spklu_df, battery_capacity_kwh,
                  start, goal, connector_type, initial_soc, max_steps=200):
         super().__init__()
-        self.G = G
-        self.spklu = spklu_df
-        self.capacity = battery_capacity_kwh
+        self.G         = G
+        self.spklu     = spklu_df
+        self.capacity  = battery_capacity_kwh
         self.initial_soc = initial_soc if initial_soc is not None else battery_capacity_kwh
         self.connector = connector_type
-        self.min_soc = 0.2 * self.capacity
+        self.min_soc   = 0.2 * self.capacity
         self.max_steps = max_steps
 
         # map start/goal → nearest node
         self.start = ox.distance.nearest_nodes(G, *ox.geocode(start)[::-1])
-        self.goal = ox.distance.nearest_nodes(G, *ox.geocode(goal)[::-1])
+        self.goal  = ox.distance.nearest_nodes(G, *ox.geocode(goal)[::-1])
 
         # action_space = max degree + 1 (for “charge”)
-        self.max_deg = max(dict(self.G.degree()).values())
-        self.action_space = spaces.Discrete(self.max_deg + 1)
+        self.max_deg      = max(dict(self.G.degree()).values())
+        self.action_space = spaces.Discrete(self.max_deg + 2)
 
         # observation_space = [dist_norm, soc_ratio, norm_spklu, step_ratio]
         K = 3
         self.observation_space = spaces.Box(
-            low=0.0, high=1.0, shape=(4 + 3 * K,), dtype=np.float32
+            low=0.0, high=1.0, shape=(4 + 3*K,), dtype=np.float32
         )
 
         # precompute max possible distance (diagonal bounding box)
-        ys = [d['y'] for _, d in G.nodes(data=True)]
-        xs = [d['x'] for _, d in G.nodes(data=True)]
+        ys = [d['y'] for _,d in G.nodes(data=True)]
+        xs = [d['x'] for _,d in G.nodes(data=True)]
         self._max_dist = self._haversine_coords(min(ys), min(xs), max(ys), max(xs))
 
         # fallback consumption (kWh per km)
         self.fallback_consumption_kwh_per_km = 0.15
 
         # reward scalars
-        self.step_penalty = -0.1
+        self.step_penalty    = -0.1
         self.low_soc_penalty = -10.0
-        self.charge_reward = +20.0
-        self.goal_reward = +100.0
-        self.death_penalty = -50.0
+        self.charge_reward   = +20.0
+        self.goal_reward     = +100.0
+        self.death_penalty   = -50.0
         self.recommendation_reward = +10.0
         self.distance_to_goal_penalty = -10.0
 
@@ -53,11 +52,11 @@ class EVRouteEnv(gym.Env):
         self.reset()
 
     def reset(self):
-        self.node = self.start
-        self.soc = self.initial_soc
+        self.node          = self.start
+        self.soc           = self.initial_soc
         self.visited_spklu = []
-        self.done = False
-        self.step_count = 0
+        self.done          = False
+        self.step_count    = 0
         # initialize path tracking
         self.path = [self.node]
         self.trajectory = [self.node]
@@ -69,10 +68,13 @@ class EVRouteEnv(gym.Env):
         reward = 0.0
         prev_dist = self._haversine_distance(self.node, self.goal)
 
-        if actual == 'charge':
+        if actual == 'stay':
+            self.done = True
+            reward += self.death_penalty
+
+        elif actual == 'charge':
             # Charge action
-            if self.G.nodes[self.node].get('is_spklu') and self.connector in self.G.nodes[self.node].get(
-                    'available_connectors', []):
+            if self.G.nodes[self.node].get('is_spklu') and self.connector in self.G.nodes[self.node].get('available_connectors', []):
                 self.soc = self.capacity
                 if self.node not in self.visited_spklu:
                     spklu_name = self.G.nodes[self.node].get('spklu_name')
@@ -85,17 +87,16 @@ class EVRouteEnv(gym.Env):
             # stay-put if no valid edge
             if not self.G.has_edge(self.node, actual):
                 reward += self.step_penalty
-                print('Penalty stay put:', reward)
             else:
                 edge_data = self.G.get_edge_data(self.node, actual)
                 attrs = edge_data[list(edge_data.keys())[0]]
 
                 # distance and energy
-                distance_km = attrs.get('distance', attrs.get('length', 0) / 1000)
+                distance_km = attrs.get('distance', attrs.get('length',0)/1000)
                 energy = attrs.get('energy', distance_km * self.fallback_consumption_kwh_per_km)
 
                 # update SOC & node
-                self.soc -= energy
+                self.soc  -= energy
                 self.node = actual
 
                 # reward shaping
@@ -117,8 +118,6 @@ class EVRouteEnv(gym.Env):
                 if self.soc <= 0:
                     self.done = True
                     reward += self.death_penalty
-
-                print('total reward:', reward)
 
         # rekam setiap pindah (termasuk revisit)
         if actual != 'charge':
@@ -198,29 +197,28 @@ class EVRouteEnv(gym.Env):
             if self.soc >= needed_spk and spk_node is not None:
                 # arah ke SPKLU terdekat
                 path_spk = nx.shortest_path(self.G, source=self.node, target=spk_node,
-                                            weight='energy')
+                                        weight='energy')
                 hop = path_spk[1] if len(path_spk) > 1 else self.node
                 if hop in acts:
                     acts.remove(hop)
                 acts.insert(0, hop)
 
                 if (self.G.nodes[self.node].get('is_spklu') and
-                        self.soc < needed_goal
-                        and self.connector in self.G.nodes[self.node].get('available_connectors', [])
+                    self.soc < needed_goal
+                    and self.connector in self.G.nodes[self.node].get('available_connectors', [])
                 ):
                     if 'charge' in acts:
                         acts.remove('charge')
                     acts.insert(0, 'charge')
             else:
                 # energi terlalu rendah tidak bergerak dan selesaikan episode
-                self.done = True
-                self.action_list = []
-                return
+                acts.insert(0, 'stay')
 
         # pad hingga panjang == action_space.n
         while len(acts) < self.action_space.n:
             acts.append(acts[0])
-        print(acts)
+            #acts.append(random.choice(acts))
+
         # trim ke ukuran maksimum
         self.action_list = acts[: self.action_space.n]
 
@@ -232,10 +230,10 @@ class EVRouteEnv(gym.Env):
             d_goal = self._haversine_distance(n, self.goal) / self._max_dist
             # energy cost ke neighbor
             energy = self.G[self.node][n].get('energy',
-                                              self.G[self.node][n].get(
-                                                  'distance',
-                                                  self.G[self.node][n].get('length', 0) / 1000
-                                              ) * self.fallback_consumption_kwh_per_km)
+                      self.G[self.node][n].get(
+                          'distance',
+                          self.G[self.node][n].get('length', 0) / 1000
+                      ) * self.fallback_consumption_kwh_per_km)
             # normalisasi energy (asumsi E_max = capacity)
             e_norm = energy / self.capacity
             score = alpha * d_goal + beta * e_norm
@@ -296,10 +294,9 @@ class EVRouteEnv(gym.Env):
 
     def _haversine_coords(self, lat1, lon1, lat2, lon2):
         R = 6371.0
-        dlat = radians(lat2 - lat1);
-        dlon = radians(lon2 - lon1)
-        a = sin(dlat / 2) ** 2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon / 2) ** 2
-        c = 2 * atan2(sqrt(a), sqrt(1 - a))
+        dlat = radians(lat2-lat1); dlon = radians(lon2-lon1)
+        a = sin(dlat/2)**2 + cos(radians(lat1))*cos(radians(lat2))*sin(dlon/2)**2
+        c = 2 * atan2(sqrt(a), sqrt(1-a))
         return R * c
 
     def estimate_energi_to(self, target_node):
@@ -335,4 +332,4 @@ class EVRouteEnv(gym.Env):
             return float('inf'), None
         # hitung energi ke tiap spklu
         costs = [(self.estimate_energi_to(n), n) for n in spk_nodes]
-        return min(costs, key=lambda x: x[0])
+        return min(costs, key=lambda x:x[0])
