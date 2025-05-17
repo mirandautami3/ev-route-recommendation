@@ -31,11 +31,11 @@ class DQNAgent:
         # copy weights from primary model to target model
         self.target_model.set_weights(self.model.get_weights())
 
-    def remember(self, state, action, reward, next_state, done):
+    def remember(self, state, action, reward, next_state, done): # hasil state state, action, reward, next_state, done dari environment di simpan (replay buffer)
         # store experience tuple
         self.memory.append((state, action, reward, next_state, done))
 
-    def act(self, state):
+    def act(self, state):  # proses menerima state dan menilih action dengan epsilon greedy
         # epsilon-greedy on full action space
         if np.random.rand() <= self.epsilon:
             return random.randrange(self.action_size)
@@ -43,7 +43,7 @@ class DQNAgent:
         q_values = self.model.predict(state[np.newaxis, :], verbose=0)[0]
         return np.argmax(q_values)
 
-    def replay(self, batch_size):
+    def replay(self, batch_size): # proses traning dengan menggunakan pengalaman dari replay buffer 
         if len(self.memory) < batch_size:
             return
         minibatch = random.sample(self.memory, batch_size)

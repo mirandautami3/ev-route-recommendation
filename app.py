@@ -163,3 +163,4 @@ if st.session_state.get('run_inference', False):
                 st.markdown('</div>', unsafe_allow_html=True)
 
 
+# run python -m streamlit run app.py

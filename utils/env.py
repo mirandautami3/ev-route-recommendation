@@ -6,8 +6,7 @@ from gym import spaces
 from math import radians, sin, cos, sqrt, atan2
 
 class EVRouteEnv(gym.Env):
-    def __init__(self, G, spklu_df, battery_capacity_kwh,
-                 start, goal, connector_type, initial_soc, max_steps=200):
+    def __init__(self, G, spklu_df, battery_capacity_kwh,start, goal, connector_type, initial_soc, max_steps=200):
         super().__init__()
         self.G         = G
         self.spklu     = spklu_df
@@ -51,7 +50,7 @@ class EVRouteEnv(gym.Env):
         # initialize dynamic vars
         self.reset()
 
-    def reset(self):
+    def reset(self): # proses kirim state ke agent 
         self.node          = self.start
         self.soc           = self.initial_soc
         self.visited_spklu = []
@@ -79,7 +78,7 @@ class EVRouteEnv(gym.Env):
         self._update_action_list()
         return self._get_state()
 
-    def step(self, action_idx):
+    def step(self, action_idx): # menerima action dari agent dan melakukan perhitungan , mengasilkan state, action, reward, next_state, done untuk di kirim ke agent
         actual = self.action_list[action_idx]
 
         reward = 0.0
