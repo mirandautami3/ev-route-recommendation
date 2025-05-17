@@ -36,19 +36,29 @@ all_connectors = (
 )
 all_connectors = [conn.upper() for conn in all_connectors]
 
+ev_type = [
+    {"model": "Wuling Air EV Standard Range (17.3 Kwh)", "capacity": 17.3, "range": 200},
+    {"model": "Wuling Air EV Long Range (31.9 Kwh)", "capacity": 31.9, "range": 300},
+    {"model": "Wuling BinguoEV Premium Range (37.9 Kwh)", "capacity": 37.9, "range": 410},
+    {"model": "Wuling BinguoEV Long Range (31.9 Kwh)", "capacity": 31.9, "range": 333},
+    {"model": "Wuling Cloud EV (50.6 Kwh)", "capacity": 50.6, "range": 460}
+]
+options = [(ev["capacity"], ev["model"]) for ev in ev_type]
+
+max_steps = 200
 with st.sidebar:
     st.header("Input Perjalanan")
     start_address = st.text_input("📍 Alamat Awal", value="Universitas Ciputra Surabaya")
     goal_address  = st.text_input("🎯 Alamat Tujuan", value="Tunjungan Plaza")
-    capacity_kwh  = st.number_input("⚡ Kapasitas Battery EV (kWh)", min_value=1.0)
-    soc_pct       = st.slider("🔋 SOC Awal (%)", min_value=0, max_value=100)
+    capacity_kwh  = st.selectbox("⚡ Kapasitas Battery EV (kWh)", options=options, format_func=lambda x: x[1] )
+    soc_pct       = st.slider("🔋 SOC Awal (%)", min_value=0, max_value=100, value=20)
     connector     = st.selectbox("🔌 Jenis Connector", options=all_connectors, index=0)
-    max_steps     = st.number_input("🔢 Max Steps", min_value=10, max_value=1000, value=200)
 
     if st.button("▶️ Hitung Rute RL"):
         st.session_state.clear()
         st.session_state['run_inference'] = True
 
+capacity_value = capacity_kwh[0]
 # Validasi alamat menggunakan OSMnx sebelum inference
 if st.session_state.get('run_inference', False):
     # Validasi level energi
@@ -69,7 +79,7 @@ if st.session_state.get('run_inference', False):
     with st.spinner("Mencari Rute Terbaik..."):
         if 'route_coords' not in st.session_state:
             predict = predict(
-                G, model, df_spklu, soc_pct, capacity_kwh, start_address, goal_address,
+                G, model, df_spklu, soc_pct, capacity_value, start_address, goal_address,
                 connector, max_steps
             )
             st.session_state.update(predict)
@@ -77,16 +87,18 @@ if st.session_state.get('run_inference', False):
     # Render map dan summary jika sudah ada hasil\if 'route_coords' in st.session_state:
     route_coords   = st.session_state.get('route_coords', [])
     info           = st.session_state.get('info', {})
+    visited_spklu = st.session_state.get('visited_spklu', {})
     total_distance = st.session_state.get('total_distance', 0.0)
     total_energy   = st.session_state.get('total_energy', 0.0)
     status         = st.session_state.get('status', '')
     capacity_kwh   = st.session_state.get('capacity_kwh', 0.0)
     soc_pct        = st.session_state.get('soc_pct', 0.0)
-    stop           = st.session_state.get('stop', False)
 
-    if stop:
-        st.warning("⚠️ Energi tidak cukup untuk pergi ke SPKLU terdekat.")
-        st.stop()
+    if visited_spklu:
+        visited_name = [spklu['spklu_name'] for spklu in visited_spklu]
+        spklu_name = ', '.join(visited_name)
+    else:
+        spklu_name = '-'
 
     if len(route_coords) > 1:
         # Buat Map Folium
@@ -142,6 +154,9 @@ if st.session_state.get('run_inference', False):
                     unsafe_allow_html=True)
                 st.markdown(
                     f'<p style="margin:3px 0; font-size:16px;"><b>Total Energy (kWh):</b> {total_energy:.2f}</p>',
+                    unsafe_allow_html=True)
+                st.markdown(
+                    f'<p style="margin:3px 0; font-size:16px;"><b>Visited SPKLU:</b> {spklu_name}</p>',
                     unsafe_allow_html=True)
                 st.markdown(f'<p style="margin:3px 0; font-size:16px;"><b>Energy Status:</b> {status}</p>',
                             unsafe_allow_html=True)

@@ -60,11 +60,28 @@ class EVRouteEnv(gym.Env):
         # initialize path tracking
         self.path = [self.node]
         self.trajectory = [self.node]
+
+        # reverse graph
+        self.reversed_G = self.G.reverse(copy=False)
+
+        self.dist_to_goal = {}
+        self.next_hop_to_goal = {}
+
+        self.compute_path_to_goal()
+
+        # SPKLU
+        self.dist_to_spklu = {}
+        self.next_hop_to_spklu = {}
+
+        if self.soc < self.dist_to_goal.get(self.start, float('inf')):
+            self.compute_path_to_spklu()
+
         self._update_action_list()
         return self._get_state()
 
     def step(self, action_idx):
         actual = self.action_list[action_idx]
+
         reward = 0.0
         prev_dist = self._haversine_distance(self.node, self.goal)
 
@@ -79,6 +96,7 @@ class EVRouteEnv(gym.Env):
                 if self.node not in self.visited_spklu:
                     spklu_name = self.G.nodes[self.node].get('spklu_name')
                     self.visited_spklu.append({'spklu_name': spklu_name, 'node': self.node})
+
                 reward += self.charge_reward
             else:
                 reward += self.death_penalty
@@ -145,81 +163,56 @@ class EVRouteEnv(gym.Env):
         }
 
     def _update_action_list(self):
-        # all neighbors (fallback to self if isolated)
-        neighbors = list(self.G.neighbors(self.node))
-        if not neighbors:
-            neighbors = [self.node]
+        def insert_front(item, lst):
+            if item in lst:
+                lst.remove(item)
+            lst.insert(0, item)
 
-        # filter only unvisited
-        acts = [n for n in neighbors if n not in self.path]
-        # if none unvisited, restore all neighbors
-        if not acts:
-            acts = neighbors.copy()
+        # Ambil semua neighbor dari node sekarang
+        neighbors = list(self.G.neighbors(self.node)) or [self.node]
 
-        needed_goal = self.estimate_energi_to_goal()
+        # Ambil neighbor yang belum dikunjungi
+        acts = [n for n in neighbors if n not in self.path] or neighbors.copy()
+        needed_goal = self.dist_to_goal.get(self.node, float('inf'))
 
-        # add charge if available
-        if self.G.nodes[self.node].get('is_spklu') and self.soc < needed_goal:
+        # Tambahkan opsi "charge" jika ada SPKLU dan energi kurang dari jarak ke goal
+        if( self.G.nodes[self.node].get('is_spklu') and
+            self.soc < needed_goal and
+            self.connector in self.G.nodes[self.node].get('available_connectors', [])
+          ):
             acts.append('charge')
 
-        # safety: if still empty, allow stay‑put
+        # Jika daftar aksi kosong, tetap di tempat
         if not acts:
             acts = [self.node]
 
-        # recommend best neighbor → taruh di depan
+        # Rekomendasikan neighbor terbaik
         best = self.recommend_neighbor()
-        if best in acts:
-            acts.remove(best)
-            acts.insert(0, best)
+        insert_front(best, acts)
 
-        # kalau energi cukup ke goal
+        # Jika cukup energi ke goal
         if self.soc >= needed_goal:
-            path_to_goal = nx.shortest_path(
-                self.G,
-                source=self.node,
-                target=self.goal,
-                weight='energy'
-            )
-            # ambil hop berikutnya jika ada
-            if len(path_to_goal) > 1:
-                hop = path_to_goal[1]
-            else:
-                hop = self.node
-
-            # masukkan hop di depan acts
-            if hop in acts:
-                acts.remove(hop)
-            acts.insert(0, hop)
-
+            hop = self.next_hop_to_goal.get(self.node)
+            insert_front(hop, acts)
         else:
-            # energi tidak cukup ke goal
-            needed_spk, spk_node = self.estimate_energi_to_nearest_spklu()
-            if self.soc >= needed_spk and spk_node is not None:
-                # arah ke SPKLU terdekat
-                path_spk = nx.shortest_path(self.G, source=self.node, target=spk_node,
-                                        weight='energy')
-                hop = path_spk[1] if len(path_spk) > 1 else self.node
-                if hop in acts:
-                    acts.remove(hop)
-                acts.insert(0, hop)
+            # Tidak cukup energi ke goal, coba ke SPKLU
+            cost_spk = self.dist_to_spklu.get(self.node, float('inf'))
+            if cost_spk < float('inf') and self.soc >= cost_spk:
+                hop_spk = self.next_hop_to_spklu.get(self.node)
+                insert_front(hop_spk, acts)
 
-                if (self.G.nodes[self.node].get('is_spklu') and
-                    self.soc < needed_goal
-                    and self.connector in self.G.nodes[self.node].get('available_connectors', [])
-                ):
-                    if 'charge' in acts:
-                        acts.remove('charge')
-                    acts.insert(0, 'charge')
+                is_spk_here = self.G.nodes[self.node].get('is_spklu')
+                available_conns = self.G.nodes[self.node].get('available_connectors', [])
+
+                if is_spk_here and self.soc < needed_goal and self.connector in available_conns:
+                    insert_front('charge', acts)
             else:
-                # energi terlalu rendah tidak bergerak dan selesaikan episode
-                acts.insert(0, 'stay')
+                insert_front('stay', acts)
 
-        # pad hingga panjang == action_space.n
+        # Tambahkan duplikasi aksi hingga sepanjang action_space.n
         while len(acts) < self.action_space.n:
             acts.append(acts[0])
-            #acts.append(random.choice(acts))
 
-        # trim ke ukuran maksimum
         self.action_list = acts[: self.action_space.n]
 
     def recommend_neighbor(self, alpha=0.7, beta=0.3):
@@ -299,37 +292,38 @@ class EVRouteEnv(gym.Env):
         c = 2 * atan2(sqrt(a), sqrt(1-a))
         return R * c
 
-    def estimate_energi_to(self, target_node):
-        # energi cost per node
-        def edge_energi(u, v, data):
-            # 1) pakai energy kalau ada
-            if data.get('energy') is not None:
-                return data['energy']
-            dist_km = data.get('distance', data.get('length', 0) / 1000)
-            return dist_km * self.fallback_consumption_kwh_per_km
+    def compute_path_to_goal(self):
+        dist_all, paths_all = nx.single_source_dijkstra(
+            self.reversed_G, source=self.goal, weight='energy'
+        )
+        # simpan energi
+        self.dist_to_goal = dist_all
+        # build next_hop: dari node n → goal
+        self.next_hop_to_goal = {}
+        for node, seq in paths_all.items():
+            rev = seq[::-1]  # [node, ..., goal]
+            # jika panjang >1, next hop = elemen ke-1, else node == goal
+            self.next_hop_to_goal[node] = rev[1] if len(rev) > 1 else node
 
-        try:
-            path = nx.shortest_path(self.G, source=self.node, target=target_node, weight=edge_energi)
-        except nx.NetworkXNoPath:
-            return float('inf')
-        total = 0.0
-        for u, v in zip(path, path[1:]):
-            data = self.G.get_edge_data(u, v)
-            attrs = data[list(data.keys())[0]]
-            total += edge_energi(u, v, attrs)
-        return total
-
-    def estimate_energi_to_goal(self):
-        return self.estimate_energi_to(self.goal)
-
-    def estimate_energi_to_nearest_spklu(self):
-        # cari spklu terdekat
+    def compute_path_to_spklu(self):
         spk_nodes = [
             n for n, d in self.G.nodes(data=True)
             if d.get('is_spklu') and self.connector in d.get('available_connectors', [])
         ]
         if not spk_nodes:
-            return float('inf'), None
-        # hitung energi ke tiap spklu
-        costs = [(self.estimate_energi_to(n), n) for n in spk_nodes]
-        return min(costs, key=lambda x:x[0])
+            self.dist_to_spklu = {}
+            self.next_hop_to_spklu = {}
+            return
+
+        dist_all, paths_all = nx.multi_source_dijkstra(
+            self.reversed_G, sources=spk_nodes, weight='energy'
+        )
+
+        # Simpan jarak ke SPKLU terdekat untuk setiap node
+        self.dist_to_spklu = dist_all
+
+        # Bangun next_hop: dari node → SPKLU
+        self.next_hop_to_spklu = {}
+        for node, seq in paths_all.items():
+            rev = seq[::-1]
+            self.next_hop_to_spklu[node] = rev[1] if len(rev) > 1 else node

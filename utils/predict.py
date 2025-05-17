@@ -17,14 +17,6 @@ def predict(
         max_steps=max_steps
     )
 
-    # validasi energy
-    needed_spk, spk_node = env.estimate_energi_to_nearest_spklu()
-    if spk_node is None:
-        return {'stop': True}
-
-    if initial_soc < needed_spk:
-        return {'stop': True}
-
     state_size = env.observation_space.shape[0]
     action_size = env.action_space.n
 
@@ -37,12 +29,20 @@ def predict(
     total_distance = 0.0
     total_energy = 0.0
 
+    status = ''
+    ever_stayed = False
+    ever_charged = False
     while not done:
         q_values = agent.model.predict(np.expand_dims(state, axis=0), verbose=0)
         action_idx = np.argmax(q_values[0])
         state, reward, done, info = env.step(action_idx)
 
         actual = env.action_list[action_idx]
+        if actual == 'stay':
+            ever_stayed = True
+        elif actual == 'charge':
+            ever_charged = True
+
         if actual != 'charge':
             u, v = env.trajectory[-2], env.trajectory[-1]
             if u != v and env.G.has_edge(u, v):
@@ -53,15 +53,21 @@ def predict(
                 total_energy += energy
 
     path_nodes = info.get('path', [])
+    visited_spklu = info.get('visited_spklu', [])
     route_coords = [(G.nodes[n]['y'], G.nodes[n]['x']) for n in path_nodes]
-    enough_energy = capacity_kwh >= total_energy
-    status = "✅ Enough" if enough_energy else "❌ Not Enough"
+
+    if ever_stayed:
+        status = '❌ Tidak cukup - sebab tidak ada SPKLU yang cocok dan ditemukan pada jalur'
+    elif ever_charged:
+        status = '⚠️ Cukup - namun harus mengisi dulu ke SPKLU'
+    else:
+        status = '✅ Cukup - rute langsung ke tujuan'
 
     return {
-        'stop': False,
         'route_coords': route_coords,
         'info': info,
         'path_nodes': path_nodes,
+        'visited_spklu': visited_spklu,
         'total_distance': total_distance,
         'total_energy': total_energy,
         'status': status,
